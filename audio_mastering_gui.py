@@ -21,11 +21,27 @@ import sys
 import threading
 import time
 import math
+import logging
+import re
 from typing import List, Dict, Optional, Tuple
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib
+
+# Configure logging with multiple levels
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] 🎛️ %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+def set_debug_level(level: str):
+    """Set debugging verbosity level."""
+    levels = {'DEBUG': logging.DEBUG, 'INFO': logging.INFO, 'WARNING': logging.WARNING, 'ERROR': logging.ERROR}
+    logging.getLogger().setLevel(levels.get(level.upper(), logging.INFO))
+    logger.info(f"Debug level set to: {level.upper()}")
 
 # Configuration loading with fallback defaults
 CONFIG = {}
@@ -81,11 +97,75 @@ except (FileNotFoundError, Exception):
 
 def run_cmd(cmd: str) -> Tuple[int, str, str]:
     """Execute a shell command and return (exit_code, stdout, stderr)."""
+    logger.debug(f"Running command: {cmd}")
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"Command failed (exit {result.returncode}): {cmd}")
+            logger.error(f"stderr: {result.stderr}")
+        else:
+            logger.debug(f"Command succeeded: {cmd}")
         return result.returncode, result.stdout, result.stderr
     except Exception as e:
+        logger.error(f"Exception running command '{cmd}': {e}")
         return 1, "", str(e)
+
+def find_module_ids(pattern: str) -> List[str]:
+    """Find PulseAudio module IDs matching a pattern."""
+    logger.debug(f"Finding modules matching pattern: {pattern}")
+    code, out, _ = run_cmd("pactl list modules")
+    if code != 0:
+        return []
+    
+    module_ids = []
+    current_id = None
+    
+    for line in out.splitlines():
+        # Look for module ID line
+        if line.startswith("Module #"):
+            current_id = line.split("#")[1].strip()
+        # Check if current module matches pattern
+        elif current_id and re.search(pattern, line):
+            module_ids.append(current_id)
+            logger.debug(f"Found matching module: #{current_id}")
+            current_id = None  # Don't match this module again
+    
+    return module_ids
+
+def unload_modules_by_patterns(patterns: List[str]) -> None:
+    """Unload all modules matching any of the given patterns."""
+    for pattern in patterns:
+        logger.debug(f"Unloading modules matching: {pattern}")
+        module_ids = find_module_ids(pattern)
+        for module_id in module_ids:
+            logger.info(f"Unloading module #{module_id}")
+            run_cmd(f"pactl unload-module {module_id}")
+
+def stop_pipeline() -> None:
+    """Stop and clean up the entire audio processing pipeline."""
+    logger.info("🧹 Stopping audio processing pipeline...")
+    
+    # Get pipeline sink names from config
+    splitter_sink = CONFIG["pipeline"]["splitter_sink_name"]
+    compressor_sink = CONFIG["pipeline"].get("compressor_sink_name", "compressor")
+    limiter_sink = CONFIG["pipeline"].get("limiter_sink_name", "limiter")
+    eq_sink = CONFIG["pipeline"].get("eq_sink_name", "eq")
+    multicomp_sink = CONFIG["pipeline"].get("multicomp_sink_name", "multicomp")
+    
+    # Unload processing chain (reverse order)
+    patterns = [
+        "module-loopback.*source=splitter_",
+        f"module-remap-source.*source_name=(splitter_left|splitter_right)",
+        f"module-ladspa-sink.*sink_name={multicomp_sink}",
+        f"module-ladspa-sink.*sink_name={eq_sink}",
+        f"module-ladspa-sink.*sink_name={limiter_sink}",
+        f"module-ladspa-sink.*sink_name={compressor_sink}",
+        f"module-null-sink.*sink_name={splitter_sink}",
+        "module-combine-sink.*sink_name=stereo_split"  # Legacy cleanup
+    ]
+    
+    unload_modules_by_patterns(patterns)
+    logger.info("✅ Pipeline cleanup complete")
 
 def pactl_sinks() -> List[str]:
     """Returns a list of sink names, excluding internal pipeline sinks."""
@@ -135,26 +215,23 @@ class WaveformWidget(Gtk.DrawingArea):
         """Background thread to capture audio levels for visualization."""
         while self.monitoring:
             try:
-                # Get input levels from splitter monitor
-                code, out, _ = run_cmd(f"pactl list sources | grep -A20 '{CONFIG['pipeline']['splitter_sink_name']}.monitor'")
-                if code == 0 and "Volume:" in out:
-                    # Parse volume levels for visualization
-                    # This is a simplified approach - real implementation would use PulseAudio C API
-                    level = 0.1 + 0.4 * math.sin(time.time() * 2)  # Simulated for now
-                    self.input_samples[self.sample_index] = level
-                    
-                    # Simulate processed output (would be different in real implementation)
-                    self.output_samples[self.sample_index] = level * 0.7  # Compressed/limited
-                    
-                    self.sample_index = (self.sample_index + 1) % len(self.input_samples)
-                    
-                    # Trigger redraw
-                    GLib.idle_add(self.queue_draw)
+                # Simulate waveform data for now (better than spamming failed commands)
+                # Real implementation would monitor actual PulseAudio streams
+                level_input = 0.3 + 0.2 * math.sin(time.time() * 3)  # Simulated input
+                level_output = level_input * 0.8  # Simulated processing
+                
+                self.input_samples[self.sample_index] = level_input
+                self.output_samples[self.sample_index] = level_output
+                
+                self.sample_index = (self.sample_index + 1) % len(self.input_samples)
+                
+                # Trigger redraw at reasonable rate
+                GLib.idle_add(self.queue_draw)
                     
             except Exception:
                 pass
             
-            time.sleep(0.02)  # ~50 FPS
+            time.sleep(0.05)  # ~20 FPS (less CPU intensive)
     
     def on_draw(self, widget, cr, width, height, user_data=None):
         """Draw the waveform visualization."""
@@ -209,7 +286,8 @@ class MasteringGUI(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.set_title("Audio Splitter Pro - Mastering Suite")
-        self.set_default_size(1200, 900)
+        self.set_default_size(1400, 1000)  # Larger default for better scaling
+        self.set_resizable(True)  # Allow window resizing
         
         # Create main layout
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -516,6 +594,20 @@ class MasteringGUI(Gtk.ApplicationWindow):
         refresh_btn.connect("clicked", self.on_refresh_clicked)
         button_box.append(refresh_btn)
         
+        # Debug level selector
+        debug_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        button_box.append(debug_box)
+        
+        debug_box.append(Gtk.Label(label="Debug:"))
+        debug_combo = Gtk.ComboBoxText()
+        debug_combo.append("INFO", "INFO")
+        debug_combo.append("DEBUG", "DEBUG") 
+        debug_combo.append("WARNING", "WARNING")
+        debug_combo.append("ERROR", "ERROR")
+        debug_combo.set_active_id("INFO")
+        debug_combo.connect("changed", self.on_debug_level_changed)
+        debug_box.append(debug_combo)
+        
         # Preset buttons
         preset_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         button_box.append(preset_box)
@@ -564,18 +656,203 @@ class MasteringGUI(Gtk.ApplicationWindow):
     
     def on_apply_clicked(self, button):
         """Apply the current audio processing pipeline."""
-        print("🚀 Building professional mastering pipeline...")
-        # TODO: Implement pipeline building with all the new effects
+        logger.info("🚀 Building professional mastering pipeline...")
+        try:
+            self.build_mastering_pipeline()
+            logger.info("✅ Mastering pipeline successfully built!")
+        except Exception as e:
+            logger.error(f"❌ Failed to build pipeline: {e}")
+            # Show error dialog
+            dialog = Gtk.MessageDialog(
+                transient_for=self,
+                modal=True,
+                message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text="Pipeline Build Failed"
+            )
+            dialog.set_property("secondary-text", str(e))
+            dialog.connect("response", lambda d, r: d.destroy())
+            dialog.present()
+    
+    def build_mastering_pipeline(self):
+        """Build the complete mastering pipeline with all effects."""
+        logger.info("🔨 Building mastering pipeline...")
+        
+        # Stop any existing pipeline
+        stop_pipeline()
+        
+        # Get sink selections
+        front_sink = self.front_sink_combo.get_active_id()
+        rear_left_sink = self.rear_left_combo.get_active_id()
+        rear_right_sink = self.rear_right_combo.get_active_id()
+        
+        # Validate at least one output is selected
+        if all(sink == "disabled" for sink in [front_sink, rear_left_sink, rear_right_sink]):
+            raise ValueError("At least one output sink must be enabled")
+        
+        # Get pipeline sink names
+        splitter_sink = CONFIG["pipeline"]["splitter_sink_name"]
+        limiter_sink = CONFIG["pipeline"].get("limiter_sink_name", "limiter")
+        eq_sink = CONFIG["pipeline"].get("eq_sink_name", "eq")
+        multicomp_sink = CONFIG["pipeline"].get("multicomp_sink_name", "multicomp")
+        
+        # Step 1: Create splitter sink (base of the chain)
+        logger.info("   Creating audio splitter...")
+        
+        # Try to get all current sinks (including internal ones for this check)
+        code, out, _ = run_cmd("pactl list short sinks")
+        all_sinks = [line.split()[1] for line in out.splitlines() if line] if code == 0 else []
+        
+        # Try different sink names if there's a conflict
+        sink_attempts = [splitter_sink, "null", "mastering_base", "audio_splitter"]
+        
+        for attempt_name in sink_attempts:
+            if attempt_name not in all_sinks:
+                logger.info(f"   Attempting to create sink: {attempt_name}")
+                code, _, stderr = run_cmd(f"pactl load-module module-null-sink sink_name={attempt_name} sink_properties=device.description='Audio Mastering Chain'")
+                if code == 0:
+                    splitter_sink = attempt_name
+                    logger.info(f"   ✅ Successfully created sink: {splitter_sink}")
+                    break
+                else:
+                    logger.warning(f"   Failed to create {attempt_name}: {stderr}")
+            else:
+                logger.info(f"   Sink {attempt_name} already exists, reusing it")
+                splitter_sink = attempt_name
+                break
+        else:
+            raise RuntimeError("Could not create or reuse any splitter sink")
+        
+        # Step 2: Build effects chain (order matters!)
+        master_sink = splitter_sink
+        
+        # Lookahead Limiter (first in chain for peak protection)
+        if self.limiter_input_gain.get_value() != 0 or self.limiter_limit.get_value() != 0:
+            logger.info("   Adding lookahead limiter...")
+            limiter_controls = f"{self.limiter_input_gain.get_value()},{self.limiter_limit.get_value()},{self.limiter_release.get_value()}"
+            code, _, _ = run_cmd(f"pactl load-module module-ladspa-sink sink_name={limiter_sink} sink_master={master_sink} plugin={CONFIG['ladspa_plugins']['lookahead_limiter_plugin']} label=fastLookaheadLimiter control={limiter_controls}")
+            if code != 0:
+                raise RuntimeError("Failed to create lookahead limiter")
+            master_sink = limiter_sink
+        
+        # 15-band EQ (frequency shaping)
+        eq_active = any(slider.get_value() != 0 for slider in self.eq_bands.values())
+        if eq_active:
+            logger.info("   Adding 15-band EQ...")
+            eq_controls = ",".join(str(slider.get_value()) for freq in [50, 100, 156, 220, 311, 440, 622, 880, 1250, 1750, 2500, 3500, 5000, 10000, 20000] for slider in [self.eq_bands[freq]])
+            code, _, _ = run_cmd(f"pactl load-module module-ladspa-sink sink_name={eq_sink} sink_master={master_sink} plugin={CONFIG['ladspa_plugins']['multiband_eq_plugin']} label=mbeq control={eq_controls}")
+            if code != 0:
+                raise RuntimeError("Failed to create 15-band EQ")
+            master_sink = eq_sink
+        
+        # 3-band Multiband Compressor (dynamics control)
+        multicomp_active = any(self.multiband_controls[key]['enable'].get_active() for key in [1, 2, 3])
+        if multicomp_active:
+            logger.info("   Adding 3-band multiband compressor...")
+            controls = []
+            # Build control string for ZaMultiCompX2
+            for key in [1, 2, 3]:
+                band = self.multiband_controls[key]
+                controls.extend([
+                    str(band['controls']['attack'].get_value()),
+                    str(band['controls']['release'].get_value()),
+                    str(band['controls']['knee'].get_value() if 'knee' in band['controls'] else 0),
+                    str(band['controls']['ratio'].get_value()),
+                    str(band['controls']['threshold'].get_value()),
+                    str(band['controls']['makeup'].get_value()),
+                ])
+            
+            # Add crossover frequencies and other controls
+            controls.extend([
+                str(self.crossover1.get_value()),
+                str(self.crossover2.get_value()),
+                "1" if self.multiband_controls[1]['enable'].get_active() else "0",
+                "1" if self.multiband_controls[2]['enable'].get_active() else "0", 
+                "1" if self.multiband_controls[3]['enable'].get_active() else "0",
+                "0", "0", "0",  # Listen modes off
+                "1",  # Detection mode (MAX)
+                "0"   # Master trim
+            ])
+            
+            multicomp_controls = ",".join(controls)
+            code, _, _ = run_cmd(f"pactl load-module module-ladspa-sink sink_name={multicomp_sink} sink_master={master_sink} plugin={CONFIG['ladspa_plugins']['multiband_compressor_plugin']} label=ZaMultiCompX2 control={multicomp_controls}")
+            if code != 0:
+                raise RuntimeError("Failed to create multiband compressor")
+            master_sink = multicomp_sink
+        
+        # Step 3: Set up channel splitting
+        logger.info("   Setting up L/R channel routing...")
+        left_src = CONFIG["pipeline"]["left_source_name"]
+        right_src = CONFIG["pipeline"]["right_source_name"]
+        
+        # Create L/R mono sources from the final processing sink
+        code, _, _ = run_cmd(f"pactl load-module module-remap-source source_name={left_src} master={master_sink}.monitor channels=1 channel_map=mono master_channel_map=front-left")
+        if code != 0:
+            raise RuntimeError("Failed to create left channel source")
+        
+        code, _, _ = run_cmd(f"pactl load-module module-remap-source source_name={right_src} master={master_sink}.monitor channels=1 channel_map=mono master_channel_map=front-right")
+        if code != 0:
+            raise RuntimeError("Failed to create right channel source")
+        
+        # Step 4: Route to selected outputs
+        logger.info("   Routing to selected outputs...")
+        
+        if front_sink != "disabled":
+            # Both L and R to front (stereo)
+            run_cmd(f"pactl load-module module-loopback source={left_src} sink={front_sink} latency_msec=50")
+            run_cmd(f"pactl load-module module-loopback source={right_src} sink={front_sink} latency_msec=50")
+        
+        if rear_left_sink != "disabled":
+            run_cmd(f"pactl load-module module-loopback source={left_src} sink={rear_left_sink} latency_msec=50")
+        
+        if rear_right_sink != "disabled":
+            run_cmd(f"pactl load-module module-loopback source={right_src} sink={rear_right_sink} latency_msec=50")
+        
+        # Step 5: Set the processing chain as default
+        logger.info("   Setting mastering chain as default...")
+        run_cmd(f"pactl set-default-sink {master_sink}")
+        
+        # Step 6: Move existing streams to the mastering chain
+        self.move_streams_to_mastering_chain(master_sink)
+        
+        logger.info("🎛️ Professional mastering pipeline is now active!")
+    
+    def move_streams_to_mastering_chain(self, target_sink: str):
+        """Move existing audio streams to the mastering chain."""
+        logger.debug("Moving existing streams to mastering chain...")
+        code, out, _ = run_cmd("pactl list short sink-inputs")
+        if code != 0:
+            return
+        
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split()
+            if len(parts) >= 1:
+                stream_id = parts[0]
+                # Move the stream
+                run_cmd(f"pactl move-sink-input {stream_id} {target_sink}")
+                logger.debug(f"Moved stream #{stream_id} to {target_sink}")
         
     def on_stop_clicked(self, button):
         """Stop the audio processing pipeline."""
-        print("⏹️ Stopping mastering pipeline...")
-        # TODO: Implement pipeline cleanup
+        logger.info("⏹️ Stopping mastering pipeline...")
+        try:
+            stop_pipeline()
+            logger.info("✅ Pipeline stopped successfully!")
+        except Exception as e:
+            logger.error(f"❌ Error stopping pipeline: {e}")
         
     def on_refresh_clicked(self, button):
         """Refresh available sinks."""
         self.refresh_sinks()
-        print("🔄 Sinks refreshed")
+        logger.info("🔄 Sinks refreshed")
+    
+    def on_debug_level_changed(self, combo):
+        """Change the debug logging level."""
+        level = combo.get_active_id()
+        set_debug_level(level)
+        logger.info(f"🔍 Debug level changed to: {level}")
     
     def on_night_preset(self, button):
         """Apply Night Mode preset - aggressive compression, gentle EQ."""
