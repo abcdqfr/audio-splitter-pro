@@ -16,6 +16,9 @@ compressor_sink_name = "compressor"
 # The filename of the LADSPA compressor plugin to use.
 # sc4_1882.so is a great, full-featured option.
 compressor_plugin = "sc4_1882"
+lookahead_limiter_plugin = "fastLookaheadLimiter"
+multiband_eq_plugin = "mbeq"
+multiband_compressor_plugin = "ZaMultiCompX2"
 
 [compressor_defaults]
 # Default values for the SC4 compressor sliders.
@@ -26,6 +29,61 @@ knee_db = 6.0        # Smoothness of the compression transition (dB)
 attack_ms = 5.0      # How quickly compression engages (ms)
 release_ms = 100.0   # How quickly compression disengages (ms)
 makeup_gain_db = 0.0 # Final volume boost post-compression (dB)
+
+[lookahead_limiter_defaults]
+# Fast Lookahead Limiter settings - professional brick-wall limiting
+input_gain_db = 0.0   # Pre-limiting gain boost (dB)
+limit_db = -0.1       # Ceiling limit - never exceed this (dB)
+release_time_s = 0.05 # How fast limiter recovers (seconds)
+
+[multiband_eq_defaults]
+# 15-band EQ - all frequencies start flat (0 dB)
+gain_50hz = 0.0
+gain_100hz = 0.0
+gain_156hz = 0.0
+gain_220hz = 0.0
+gain_311hz = 0.0
+gain_440hz = 0.0
+gain_622hz = 0.0
+gain_880hz = 0.0
+gain_1250hz = 0.0
+gain_1750hz = 0.0
+gain_2500hz = 0.0
+gain_3500hz = 0.0
+gain_5000hz = 0.0
+gain_10000hz = 0.0
+gain_20000hz = 0.0
+
+[multiband_compressor_defaults]
+# ZaMultiCompX2 - 3-band crossover compressor
+crossover_freq1 = 200.0   # Low/Mid split frequency
+crossover_freq2 = 2000.0  # Mid/High split frequency
+# Band 1 (Low frequencies)
+attack1 = 25.0
+release1 = 125.0
+knee1 = 2.0
+ratio1 = 4.0
+threshold1 = -15.0
+makeup1 = 0.0
+enable1 = true
+# Band 2 (Mid frequencies) 
+attack2 = 15.0
+release2 = 80.0
+knee2 = 2.0
+ratio2 = 3.0
+threshold2 = -12.0
+makeup2 = 0.0
+enable2 = true
+# Band 3 (High frequencies)
+attack3 = 5.0
+release3 = 50.0
+knee3 = 1.0
+ratio3 = 2.0
+threshold3 = -10.0
+makeup3 = 0.0
+enable3 = true
+master_trim = 0.0
+detection_mode = true  # true = MAX, false = average
 
 [auto_selection_hints]
 # Keywords used by the GUI to automatically select the correct sinks
