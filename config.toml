@@ -16,9 +16,9 @@ compressor_sink_name = "compressor"
 # The filename of the LADSPA compressor plugin to use.
 # sc4_1882.so is a great, full-featured option.
 compressor_plugin = "sc4_1882"
-lookahead_limiter_plugin = "fast_lookahead_limiter_1913"
-multiband_eq_plugin = "mbeq_1197"  
-multiband_compressor_plugin = "ZaMultiCompX2-ladspa"
+lookahead_limiter_plugin = "fastLookaheadLimiter"
+multiband_eq_plugin = "mbeq"
+multiband_compressor_plugin = "ZaMultiCompX2"
 
 [compressor_defaults]
 # Default values for the SC4 compressor sliders.

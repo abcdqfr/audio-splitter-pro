@@ -104,43 +104,21 @@ def unload_modules_by_patterns(patterns: List[str]) -> None:
 
 
 def stop_pipeline() -> None:
-    """AGGRESSIVELY clean up ALL pipeline modules to ensure idempotent behavior"""
-    # Clean up in reverse order of creation (loopbacks first)
-    unload_modules_by_patterns(["module-loopback", "source=splitter_left"])
-    unload_modules_by_patterns(["module-loopback", "source=splitter_right"])
-    
-    # Clean up remap sources
-    unload_modules_by_patterns(["module-remap-source", "source_name=splitter_left"])
-    unload_modules_by_patterns(["module-remap-source", "source_name=splitter_right"])
-    
-    # Clean up LADSPA compressor
-    unload_modules_by_patterns(["module-ladspa-sink", "sink_name=compressor"])
-    
-    # Clean up ALL splitter null sinks (including numbered duplicates)
-    unload_modules_by_patterns(["module-null-sink", "sink_name=splitter"])
-    
-    print("🧹 Cleaned up existing pipeline modules")
+    unload_modules_by_patterns(["module-loopback", LEFT_SRC])
+    unload_modules_by_patterns(["module-loopback", RIGHT_SRC])
+    unload_modules_by_patterns(["module-remap-source", LEFT_SRC])
+    unload_modules_by_patterns(["module-remap-source", RIGHT_SRC])
+    unload_modules_by_patterns(["module-ladspa-sink", COMPRESSOR_SINK])
 
 
 def apply_pipeline(front_sink: str, rear_l_sink: str, rear_r_sink: str, comp_cfg: dict) -> None:
-    # AGGRESSIVE cleanup to ensure idempotent behavior
     stop_pipeline()
     
-    # Check existing sinks (including internal ones for this check)
-    code, out, _ = run_cmd("pactl list short sinks")
-    all_existing = [line.split()[1] for line in out.splitlines() if line] if code == 0 else []
-    
-    # Use existing splitter if available, otherwise create new one
-    if SPLITTER_SINK in all_existing:
+    sinks = pactl_sinks()
+    splitter = SPLITTER_SINK if SPLITTER_SINK in sinks else "null" if "null" in sinks else ""
+    if not splitter:
+        run_cmd(f"pactl load-module module-null-sink sink_name={SPLITTER_SINK} sink_properties=device.description=AudioSplitter")
         splitter = SPLITTER_SINK
-        print(f"✅ Reusing existing splitter: {splitter}")
-    elif "null" in all_existing:
-        splitter = "null"
-        print(f"✅ Reusing null sink as splitter")
-    else:
-        run_cmd(f"pactl load-module module-null-sink sink_name={SPLITTER_SINK} sink_properties=device.description='🎛️ ASP Input'")
-        splitter = SPLITTER_SINK
-        print(f"✅ Created new splitter: {splitter}")
 
     controls = (f"1,{comp_cfg['attack_ms']},{comp_cfg['release_ms']},"
                 f"{comp_cfg['threshold_db']},{comp_cfg['ratio']},"
@@ -176,15 +154,6 @@ class AudioSplitterWindow(Gtk.ApplicationWindow):
         
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15, margin_top=15, margin_bottom=15, margin_start=15, margin_end=15)
         self.set_child(outer)
-        
-        # Status bar at the bottom
-        self.status_label = Gtk.Label(label="🎛️ Audio Splitter Pro - Ready")
-        self.status_label.set_xalign(0)  # Left align
-        self.status_label.set_wrap(True)
-        self.status_label.set_selectable(True)  # Allow copying error text
-        status_frame = Gtk.Frame(label="Status")
-        status_frame.set_child(self.status_label)
-        status_frame.set_margin_top(10)
 
         # Sink selection
         self.sinks_store = Gtk.StringList()
@@ -204,6 +173,50 @@ class AudioSplitterWindow(Gtk.ApplicationWindow):
             ("Rear Balance (L/R)", self.rear_balance_scale)
         ])
         outer.append(vol_frame)
+
+        # Fast Lookahead Limiter controls
+        limiter_frame = self._create_frame("🧱 Fast Lookahead Limiter", [])
+        
+        # Input Gain
+        limiter_input_row = Gtk.Grid()
+        limiter_input_row.set_column_spacing(10)
+        limiter_input_label = Gtk.Label(label="Input Gain (dB):")
+        limiter_input_label.set_hexpand(False)
+        self.limiter_input_gain = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -20, 20, 0.1)
+        self.limiter_input_gain.set_value(CONFIG.get("lookahead_limiter_defaults", {}).get("input_gain_db", 0.0))
+        self.limiter_input_gain.set_hexpand(True)
+        self.limiter_input_gain.set_tooltip_text("**Pre-limiting gain boost**\n*Raises the signal level before limiting*\nLower = quieter input, Higher = louder input")
+        limiter_input_row.attach(limiter_input_label, 0, 0, 1, 1)
+        limiter_input_row.attach(self.limiter_input_gain, 1, 0, 1, 1)
+        limiter_frame.append(limiter_input_row)
+        
+        # Limit Threshold
+        limiter_limit_row = Gtk.Grid()
+        limiter_limit_row.set_column_spacing(10)
+        limiter_limit_label = Gtk.Label(label="Limit (dB):")
+        limiter_limit_label.set_hexpand(False)
+        self.limiter_limit = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -20, 0, 0.1)
+        self.limiter_limit.set_value(CONFIG.get("lookahead_limiter_defaults", {}).get("limit_db", -0.1))
+        self.limiter_limit.set_hexpand(True)
+        self.limiter_limit.set_tooltip_text("**Absolute ceiling threshold**\n*No signal will exceed this level*\nLower = more aggressive limiting, Higher = allows louder peaks")
+        limiter_limit_row.attach(limiter_limit_label, 0, 0, 1, 1)
+        limiter_limit_row.attach(self.limiter_limit, 1, 0, 1, 1)
+        limiter_frame.append(limiter_limit_row)
+        
+        # Release Time
+        limiter_release_row = Gtk.Grid()
+        limiter_release_row.set_column_spacing(10)
+        limiter_release_label = Gtk.Label(label="Release (s):")
+        limiter_release_label.set_hexpand(False)
+        self.limiter_release = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.01, 2.0, 0.01)
+        self.limiter_release.set_value(CONFIG.get("lookahead_limiter_defaults", {}).get("release_time_s", 0.05))
+        self.limiter_release.set_hexpand(True)
+        self.limiter_release.set_tooltip_text("**Recovery speed after limiting**\n*How quickly the limiter stops working*\nLower = faster recovery, Higher = smoother but slower")
+        limiter_release_row.attach(limiter_release_label, 0, 0, 1, 1)
+        limiter_release_row.attach(self.limiter_release, 1, 0, 1, 1)
+        limiter_frame.append(limiter_release_row)
+        
+        outer.append(limiter_frame)
 
         # Compressor controls
         comp_frame = self._create_frame(f"Compressor ({SC4_PLUGIN})", [])
@@ -264,9 +277,6 @@ Lower values make the final sound quieter; higher values make it much louder.</i
             btn = Gtk.Button(label=label)
             btn.connect("clicked", callback)
             btn_box.append(btn)
-        
-        # Add status bar at the bottom
-        outer.append(status_frame)
 
         self.front_vol_adj.connect("value-changed", self.on_front_volume_changed)
         self.rear_balance_adj.connect("value-changed", self.on_rear_balance_changed)
@@ -276,10 +286,6 @@ Lower values make the final sound quieter; higher values make it much louder.</i
         self.rear_r_combo.connect("notify::selected-item", self.on_sink_selection_changed)
         
         self.on_refresh()
-    
-    def update_status(self, message: str) -> None:
-        """Update the status bar with current operation info"""
-        GLib.idle_add(lambda: self.status_label.set_text(message))
 
     def _create_frame(self, title: str, widgets: List[Tuple[str, Gtk.Widget]]) -> Gtk.Frame:
         frame = Gtk.Frame(label=title)
@@ -292,11 +298,9 @@ Lower values make the final sound quieter; higher values make it much louder.</i
         return frame
 
     def on_refresh(self, *args):
-        self.update_status("🔄 Refreshing available sinks...")
         selections = self.current_selection()
         names = [DISABLED_SINK_TEXT] + pactl_sinks()
         self.sinks_store.splice(0, self.sinks_store.get_n_items(), names)
-        self.update_status(f"✅ Found {len(names)-1} available sinks")
         
         def select(combo: Gtk.DropDown, saved: str, hints: List[str]):
             if saved in names: 
@@ -344,25 +348,11 @@ Lower values make the final sound quieter; higher values make it much louder.</i
         if rear_r: self._set_volume_async(rear_r, int(right_vol * max_vol / 100))
 
     def on_apply(self, *args):
-        self.update_status("🚀 Building Audio Splitter Pro pipeline...")
         sinks = self.current_selection()
         comp_cfg = {k: adj.get_value() for k, adj in self.comp_adjs.items()}
-        
-        def run_and_update():
-            try:
-                apply_pipeline(*sinks, comp_cfg)
-                self.update_status("✅ Pipeline active! L→Rear L, R→Rear R")
-            except Exception as e:
-                self.update_status(f"❌ Pipeline failed: {str(e)}")
-        
-        GLib.idle_add(run_and_update)
+        GLib.idle_add(apply_pipeline, *sinks, comp_cfg)
 
-    def on_stop(self, *args): 
-        self.update_status("🛑 Stopping pipeline...")
-        def run_and_update():
-            stop_pipeline()
-            self.update_status("⏹️ Pipeline stopped")
-        GLib.idle_add(run_and_update)
+    def on_stop(self, *args): GLib.idle_add(stop_pipeline)
 
 class AudioSplitterApp(Gtk.Application):
     def __init__(self): super().__init__(application_id=APP_ID)
