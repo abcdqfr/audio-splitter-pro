@@ -104,43 +104,21 @@ def unload_modules_by_patterns(patterns: List[str]) -> None:
 
 
 def stop_pipeline() -> None:
-    """AGGRESSIVELY clean up ALL pipeline modules to ensure idempotent behavior"""
-    # Clean up in reverse order of creation (loopbacks first)
-    unload_modules_by_patterns(["module-loopback", "source=splitter_left"])
-    unload_modules_by_patterns(["module-loopback", "source=splitter_right"])
-    
-    # Clean up remap sources
-    unload_modules_by_patterns(["module-remap-source", "source_name=splitter_left"])
-    unload_modules_by_patterns(["module-remap-source", "source_name=splitter_right"])
-    
-    # Clean up LADSPA compressor
-    unload_modules_by_patterns(["module-ladspa-sink", "sink_name=compressor"])
-    
-    # Clean up ALL splitter null sinks (including numbered duplicates)
-    unload_modules_by_patterns(["module-null-sink", "sink_name=splitter"])
-    
-    print("🧹 Cleaned up existing pipeline modules")
+    unload_modules_by_patterns(["module-loopback", LEFT_SRC])
+    unload_modules_by_patterns(["module-loopback", RIGHT_SRC])
+    unload_modules_by_patterns(["module-remap-source", LEFT_SRC])
+    unload_modules_by_patterns(["module-remap-source", RIGHT_SRC])
+    unload_modules_by_patterns(["module-ladspa-sink", COMPRESSOR_SINK])
 
 
 def apply_pipeline(front_sink: str, rear_l_sink: str, rear_r_sink: str, comp_cfg: dict) -> None:
-    # AGGRESSIVE cleanup to ensure idempotent behavior
     stop_pipeline()
     
-    # Check existing sinks (including internal ones for this check)
-    code, out, _ = run_cmd("pactl list short sinks")
-    all_existing = [line.split()[1] for line in out.splitlines() if line] if code == 0 else []
-    
-    # Use existing splitter if available, otherwise create new one
-    if SPLITTER_SINK in all_existing:
+    sinks = pactl_sinks()
+    splitter = SPLITTER_SINK if SPLITTER_SINK in sinks else "null" if "null" in sinks else ""
+    if not splitter:
+        run_cmd(f"pactl load-module module-null-sink sink_name={SPLITTER_SINK} sink_properties=device.description=AudioSplitter")
         splitter = SPLITTER_SINK
-        print(f"✅ Reusing existing splitter: {splitter}")
-    elif "null" in all_existing:
-        splitter = "null"
-        print(f"✅ Reusing null sink as splitter")
-    else:
-        run_cmd(f"pactl load-module module-null-sink sink_name={SPLITTER_SINK} sink_properties=device.description='🎛️ ASP Input'")
-        splitter = SPLITTER_SINK
-        print(f"✅ Created new splitter: {splitter}")
 
     controls = (f"1,{comp_cfg['attack_ms']},{comp_cfg['release_ms']},"
                 f"{comp_cfg['threshold_db']},{comp_cfg['ratio']},"
@@ -176,15 +154,6 @@ class AudioSplitterWindow(Gtk.ApplicationWindow):
         
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15, margin_top=15, margin_bottom=15, margin_start=15, margin_end=15)
         self.set_child(outer)
-        
-        # Status bar at the bottom
-        self.status_label = Gtk.Label(label="🎛️ Audio Splitter Pro - Ready")
-        self.status_label.set_xalign(0)  # Left align
-        self.status_label.set_wrap(True)
-        self.status_label.set_selectable(True)  # Allow copying error text
-        status_frame = Gtk.Frame(label="Status")
-        status_frame.set_child(self.status_label)
-        status_frame.set_margin_top(10)
 
         # Sink selection
         self.sinks_store = Gtk.StringList()
@@ -264,9 +233,6 @@ Lower values make the final sound quieter; higher values make it much louder.</i
             btn = Gtk.Button(label=label)
             btn.connect("clicked", callback)
             btn_box.append(btn)
-        
-        # Add status bar at the bottom
-        outer.append(status_frame)
 
         self.front_vol_adj.connect("value-changed", self.on_front_volume_changed)
         self.rear_balance_adj.connect("value-changed", self.on_rear_balance_changed)
@@ -276,10 +242,6 @@ Lower values make the final sound quieter; higher values make it much louder.</i
         self.rear_r_combo.connect("notify::selected-item", self.on_sink_selection_changed)
         
         self.on_refresh()
-    
-    def update_status(self, message: str) -> None:
-        """Update the status bar with current operation info"""
-        GLib.idle_add(lambda: self.status_label.set_text(message))
 
     def _create_frame(self, title: str, widgets: List[Tuple[str, Gtk.Widget]]) -> Gtk.Frame:
         frame = Gtk.Frame(label=title)
@@ -292,11 +254,9 @@ Lower values make the final sound quieter; higher values make it much louder.</i
         return frame
 
     def on_refresh(self, *args):
-        self.update_status("🔄 Refreshing available sinks...")
         selections = self.current_selection()
         names = [DISABLED_SINK_TEXT] + pactl_sinks()
         self.sinks_store.splice(0, self.sinks_store.get_n_items(), names)
-        self.update_status(f"✅ Found {len(names)-1} available sinks")
         
         def select(combo: Gtk.DropDown, saved: str, hints: List[str]):
             if saved in names: 
@@ -344,25 +304,11 @@ Lower values make the final sound quieter; higher values make it much louder.</i
         if rear_r: self._set_volume_async(rear_r, int(right_vol * max_vol / 100))
 
     def on_apply(self, *args):
-        self.update_status("🚀 Building Audio Splitter Pro pipeline...")
         sinks = self.current_selection()
         comp_cfg = {k: adj.get_value() for k, adj in self.comp_adjs.items()}
-        
-        def run_and_update():
-            try:
-                apply_pipeline(*sinks, comp_cfg)
-                self.update_status("✅ Pipeline active! L→Rear L, R→Rear R")
-            except Exception as e:
-                self.update_status(f"❌ Pipeline failed: {str(e)}")
-        
-        GLib.idle_add(run_and_update)
+        GLib.idle_add(apply_pipeline, *sinks, comp_cfg)
 
-    def on_stop(self, *args): 
-        self.update_status("🛑 Stopping pipeline...")
-        def run_and_update():
-            stop_pipeline()
-            self.update_status("⏹️ Pipeline stopped")
-        GLib.idle_add(run_and_update)
+    def on_stop(self, *args): GLib.idle_add(stop_pipeline)
 
 class AudioSplitterApp(Gtk.Application):
     def __init__(self): super().__init__(application_id=APP_ID)
