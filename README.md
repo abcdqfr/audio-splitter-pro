@@ -208,6 +208,22 @@ systemctl --user restart audio-splitter-pro.service
 **Modules**: 4 active (2 remap sources + 2 loopbacks)
 **Audio Quality**: Stereo separation achieved across dual HDMI outputs
 
+## 🖥️ GUI Application (v0.1)
+
+A GTK 3.0 GUI application is now available (`audio_splitter_gui_v2.py`) that provides:
+
+- **Visual Interface**: Easy sink selection and volume control
+- **Real-Time Compression**: SC4 compressor plugin integration
+- **Auto-Detection**: Automatic sink discovery and mapping
+- **Persistent Settings**: Saves configuration between sessions
+
+### Quick Start
+```bash
+python3 audio_splitter_gui_v2.py
+```
+
+The GUI automatically handles the audio pipeline setup described in this documentation.
+
 ---
 
 *This configuration represents the culmination of iterative testing and optimization. The null sink approach proved more reliable than combined sinks or complex routing schemes.*
