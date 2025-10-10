@@ -402,6 +402,7 @@ class AudioSplitterWindow(Gtk.ApplicationWindow):
             "makeup_gain_db": (compressor_settings["makeup_gain_db"], 0, 40, 1, 5),
         }.items()}
         self.front_vol_adj = Gtk.Adjustment(value=100, lower=0, upper=150, step_increment=1, page_increment=10)
+        self.front_balance_adj = Gtk.Adjustment(value=0, lower=-100, upper=100, step_increment=5, page_increment=20)
         self.rear_vol_adj = Gtk.Adjustment(value=100, lower=0, upper=150, step_increment=1, page_increment=10)
         self.rear_balance_adj = Gtk.Adjustment(value=0, lower=-100, upper=100, step_increment=5, page_increment=20)
         
@@ -419,12 +420,13 @@ class AudioSplitterWindow(Gtk.ApplicationWindow):
         self.rear_l_combo = Gtk.ComboBoxText()
         self.rear_r_combo = Gtk.ComboBoxText()
         sink_frame = self._create_frame("Output Sinks", [
-            ("Front (SPDIF)", self.front_combo), ("Rear Left (HDMI)", self.rear_l_combo), ("Rear Right (HDMI)", self.rear_r_combo)
+            ("Front L/R (HDMI)", self.front_combo), ("Rear Left (HDMI)", self.rear_l_combo), ("Rear Right (HDMI)", self.rear_r_combo)
         ])
         outer.pack_start(sink_frame, False, False, 0)
 
         # Volume controls
         self.front_vol_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.front_vol_adj, draw_value=True)
+        self.front_balance_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.front_balance_adj, draw_value=True)
         self.rear_vol_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.rear_vol_adj, draw_value=True)
         self.rear_balance_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.rear_balance_adj, draw_value=True)
         
@@ -435,6 +437,7 @@ class AudioSplitterWindow(Gtk.ApplicationWindow):
         
         vol_frame = self._create_frame("Output Volumes", [
             ("Front Vol (%)", self.front_vol_scale),
+            ("Front Balance (L/R)", self.front_balance_scale),
             ("Rear Vol (%)", self.rear_vol_scale),
             ("Rear Balance (L/R)", self.rear_balance_scale)
         ])
@@ -518,6 +521,7 @@ Lower values make the final sound quieter; higher values make it much louder.</i
             btn_box.pack_start(btn, False, False, 0)
 
         self.front_vol_adj.connect("value-changed", self.on_front_volume_changed)
+        self.front_balance_adj.connect("value-changed", self.on_front_balance_changed)
         self.rear_vol_adj.connect("value-changed", self.on_rear_volume_changed)
         self.rear_balance_adj.connect("value-changed", self.on_rear_balance_changed)
         
@@ -640,8 +644,25 @@ Lower values make the final sound quieter; higher values make it much louder.</i
         run_cmd(f"pactl set-sink-volume {shlex.quote(sink)} {vol}%")
         return GLib.SOURCE_REMOVE
 
+    def _apply_front_volume_and_balance(self):
+        """Apply both front volume and balance together"""
+        if sink := self.current_selection()[0]:
+            volume = self.front_vol_adj.get_value() / 100.0  # 0.0 to 1.5
+            balance = self.front_balance_adj.get_value()  # -100 (left) to +100 (right)
+            base_vol = 65536  # 100% in PulseAudio units
+            
+            # Calculate L/R volumes: apply volume AND balance
+            # Positive balance = reduce left, negative balance = reduce right
+            left_vol = int(base_vol * volume * (1 - max(0, balance) / 100))
+            right_vol = int(base_vol * volume * (1 - max(0, -balance) / 100))
+            
+            run_cmd(f"pactl set-sink-volume {shlex.quote(sink)} {left_vol} {right_vol}")
+    
     def on_front_volume_changed(self, adj: Gtk.Adjustment):
-        if sink := self.current_selection()[0]: self._set_volume_async(sink, int(adj.get_value()))
+        self._apply_front_volume_and_balance()
+    
+    def on_front_balance_changed(self, adj: Gtk.Adjustment):
+        self._apply_front_volume_and_balance()
 
     def on_rear_volume_changed(self, adj: Gtk.Adjustment):
         """Apply rear volume to both rear sinks equally"""
